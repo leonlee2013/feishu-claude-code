@@ -107,16 +107,16 @@ async def handle_message_async(event: P2ImMessageReceiveV1):
 
     async with lock:
         try:
-            await _process_message(user_id, chat_id, msg)
+            await _process_message(user_id, chat_id, is_group, msg)
         except Exception as e:
             print(f"[error] 消息处理异常: {type(e).__name__}: {e}", flush=True)
             traceback.print_exc(file=sys.stdout)
             sys.stdout.flush()
 
 
-async def _process_message(user_id: str, chat_id: str, msg):
+async def _process_message(user_id: str, chat_id: str, is_group: bool, msg):
     """实际处理消息的逻辑，在 per-user lock 保护下执行"""
-    print(f"[处理消息] user={user_id[:8]}... chat={chat_id[:8]}...", flush=True)
+    print(f"[处理消息] user={user_id[:8]}... chat={chat_id[:8]}... is_group={is_group}", flush=True)
     text = ""
     img_path = None
 
@@ -138,7 +138,13 @@ async def _process_message(user_id: str, chat_id: str, msg):
             text = f"[用户发送了一张图片，路径：{img_path}，请读取并分析这张图片，直接回复用中文]"
         except Exception as e:
             print(f"[error] 下载图片失败: {e}")
-            await feishu.send_text_to_user(user_id, f"❌ 下载图片失败：{e}")
+            if is_group:
+                try:
+                    await feishu.reply_card(msg.message_id, content=f"❌ 下载图片失败：{e}", loading=False)
+                except Exception:
+                    pass
+            else:
+                await feishu.send_text_to_user(user_id, f"❌ 下载图片失败：{e}")
             return
 
     else:
@@ -151,9 +157,18 @@ async def _process_message(user_id: str, chat_id: str, msg):
         reply = handle_command(cmd, args, user_id, chat_id, store)
         if reply is not None:
             if cmd == "resume" and not args:
-                await feishu.send_text_to_user(user_id, reply)
+                # /resume 命令特殊处理：发送文本消息
+                if is_group:
+                    # 群组中回复
+                    await feishu.send_text_to_user(user_id, reply)  # 暂时私聊通知
+                else:
+                    await feishu.send_text_to_user(user_id, reply)
             else:
-                await feishu.send_card_to_user(user_id, content=reply, loading=False)
+                # 其他命令：发送卡片消息
+                if is_group:
+                    await feishu.reply_card(msg.message_id, content=reply, loading=False)
+                else:
+                    await feishu.send_card_to_user(user_id, content=reply, loading=False)
             return
         # reply is None → 不是 bot 命令，当作普通消息（含 /xxx）转发给 Claude
 
@@ -163,11 +178,23 @@ async def _process_message(user_id: str, chat_id: str, msg):
 
     # 1. 发送"思考中"占位卡片，拿到 message_id
     try:
-        card_msg_id = await feishu.send_card_to_user(user_id, loading=True)
+        if is_group:
+            # 群组中回复原消息
+            card_msg_id = await feishu.reply_card(msg.message_id, loading=True)
+        else:
+            # 私聊发送新消息
+            card_msg_id = await feishu.send_card_to_user(user_id, loading=True)
         print(f"[卡片] card_msg_id={card_msg_id}", flush=True)
     except Exception as e:
         print(f"[error] 发送占位卡片失败: {e}", flush=True)
-        await feishu.send_text_to_user(user_id, f"❌ 发送消息失败：{e}")
+        if is_group:
+            # 群组中回复错误
+            try:
+                await feishu.reply_card(msg.message_id, content=f"❌ 发送消息失败：{e}", loading=False)
+            except Exception:
+                pass
+        else:
+            await feishu.send_text_to_user(user_id, f"❌ 发送消息失败：{e}")
         return
 
     # 2. 运行 Claude，等待完整回复

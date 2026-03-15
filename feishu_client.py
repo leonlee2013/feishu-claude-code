@@ -97,22 +97,25 @@ class FeishuClient:
         return await self._retry_with_backoff(_send, max_retries=3)
 
     async def reply_card(self, message_id: str, content: str = "", loading: bool = True) -> str:
-        """回复用户消息（卡片形式），触发通知。返回回复消息的 message_id"""
-        req = (
-            ReplyMessageRequest.builder()
-            .message_id(message_id)
-            .request_body(
-                ReplyMessageRequestBody.builder()
-                .msg_type("interactive")
-                .content(_card_json(content, loading=loading))
+        """回复用户消息（卡片形式），触发通知。返回回复消息的 message_id（带重试）"""
+        async def _reply():
+            req = (
+                ReplyMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .msg_type("interactive")
+                    .content(_card_json(content, loading=loading))
+                    .build()
+                )
                 .build()
             )
-            .build()
-        )
-        resp = await self.client.im.v1.message.areply(req)
-        if not resp.success():
-            raise RuntimeError(f"回复卡片消息失败: {resp.code} {resp.msg}")
-        return resp.data.message_id
+            resp = await self.client.im.v1.message.areply(req)
+            if not resp.success():
+                raise RuntimeError(f"回复卡片消息失败: {resp.code} {resp.msg}")
+            return resp.data.message_id
+
+        return await self._retry_with_backoff(_reply, max_retries=3)
 
     async def update_card(self, message_id: str, content: str):
         """用 patch 更新已发送的卡片内容（带重试）"""
