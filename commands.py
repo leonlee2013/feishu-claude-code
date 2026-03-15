@@ -6,12 +6,13 @@
 import getpass
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime
 from typing import Optional, Tuple
 
-from bot_config import CLAUDE_CLI
+from bot_config import CLAUDE_CLI, DEFAULT_CWD
 from session_store import SessionStore, scan_cli_sessions, generate_summary, _get_api_token, _write_custom_title
 
 PLUGINS_DIR = os.path.expanduser("~/.claude/plugins")
@@ -48,6 +49,8 @@ HELP_TEXT = """\
 `/mode [模式]` — 切换权限模式（default / plan / acceptEdits / bypassPermissions）
 `/status` — 显示当前 session 信息
 `/cd [路径]` — 切换工具执行的工作目录
+`/ls [路径]` — 查看当前工作目录下的文件/目录
+`/workspace` 或 `/ws` — 保存/切换群组工作空间
 
 **查看能力：**
 `/skills` — 列出已安装的 Claude Skills
@@ -80,7 +83,10 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
 
 
 # Bot 自身处理的命令，其余 /xxx 转发给 Claude
-BOT_COMMANDS = {"help", "h", "new", "clear", "resume", "model", "mode", "status", "cd", "skills", "mcp", "usage"}
+BOT_COMMANDS = {
+    "help", "h", "new", "clear", "resume", "model", "mode", "status", "cd", "ls",
+    "workspace", "ws", "skills", "mcp", "usage",
+}
 
 
 def _build_session_list(user_id: str, chat_id: str, store: SessionStore) -> list[dict]:
@@ -374,6 +380,158 @@ def _list_mcp() -> str:
     return f"🔌 **已配置的 MCP Servers**\n\n{output}"
 
 
+def _list_directory(user_id: str, chat_id: str, store: SessionStore, args: str) -> str:
+    cur = store.get_current_raw(user_id, chat_id)
+    base_dir = cur.get("cwd", DEFAULT_CWD)
+    raw_target = args.strip()
+
+    if not raw_target:
+        target = base_dir
+        display_target = "."
+    elif os.path.isabs(raw_target):
+        target = os.path.expanduser(raw_target)
+        display_target = target
+    else:
+        target = os.path.abspath(os.path.join(base_dir, os.path.expanduser(raw_target)))
+        display_target = raw_target
+
+    if not os.path.exists(target):
+        return f"❌ 路径不存在：`{display_target}`\n当前工作目录：`{base_dir}`"
+
+    if not os.path.isdir(target):
+        return f"❌ 目标不是目录：`{display_target}`"
+
+    try:
+        entries = []
+        with os.scandir(target) as it:
+            for entry in it:
+                suffix = "/" if entry.is_dir() else ""
+                entries.append((not entry.is_dir(), entry.name.lower(), f"`{entry.name}{suffix}`"))
+    except OSError as e:
+        return f"❌ 读取目录失败：{e}"
+
+    entries.sort()
+    preview = [item[2] for item in entries[:50]]
+    hidden_count = max(0, len(entries) - len(preview))
+
+    lines = [
+        "📁 **目录内容**",
+        f"请求路径：`{display_target}`",
+        f"绝对路径：`{target}`",
+    ]
+    if not preview:
+        lines.append("（空目录）")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.extend(preview)
+    if hidden_count:
+        lines.append("")
+        lines.append(f"…… 还有 {hidden_count} 项未显示")
+    return "\n".join(lines)
+
+
+def _format_workspace_list(user_id: str, chat_id: str, store: SessionStore) -> str:
+    cur = store.get_current_raw(user_id, chat_id)
+    current_name = cur.get("workspace", "")
+    current_cwd = cur.get("cwd", "~")
+    workspaces = store.list_workspaces(user_id)
+
+    lines = ["🗂 **工作空间**"]
+    lines.append(f"当前绑定：`{current_name}`" if current_name else "当前绑定：（未命名）")
+    lines.append(f"当前目录：`{current_cwd}`")
+
+    if workspaces:
+        lines.append("")
+        lines.append("已保存：")
+        for name, path in workspaces.items():
+            marker = " ← 当前群组" if name == current_name else ""
+            lines.append(f"• `{name}` → `{path}`{marker}")
+    else:
+        lines.append("")
+        lines.append("还没有已保存的工作空间。")
+
+    lines.append("")
+    lines.append("用法：")
+    lines.append("`/ws save 名称 [路径]` 保存工作空间")
+    lines.append("`/ws use 名称` 绑定当前群组到该工作空间")
+    lines.append("`/ws set 路径` 直接设置当前群组目录")
+    lines.append("`/ws remove 名称` 删除已保存的工作空间")
+    return "\n".join(lines)
+
+
+def _handle_workspace_command(
+    args: str,
+    user_id: str,
+    chat_id: str,
+    store: SessionStore,
+) -> str:
+    if not args:
+        return _format_workspace_list(user_id, chat_id, store)
+
+    try:
+        parts = shlex.split(args)
+    except ValueError as e:
+        return f"❌ 参数解析失败：{e}"
+
+    if not parts:
+        return _format_workspace_list(user_id, chat_id, store)
+
+    action = parts[0].lower()
+
+    if action in {"list", "ls"}:
+        return _format_workspace_list(user_id, chat_id, store)
+
+    if action in {"save", "add"}:
+        if len(parts) < 2:
+            return "⚠️ 用法：`/ws save 名称 [路径]`"
+        name = parts[1]
+        path = store.get_current_raw(user_id, chat_id).get("cwd", DEFAULT_CWD)
+        if len(parts) >= 3:
+            path = os.path.expanduser(parts[2])
+        if not os.path.isdir(path):
+            return f"❌ 路径不存在：`{path}`"
+        store.save_workspace(user_id, name, path)
+        return f"✅ 已保存工作空间 `{name}` → `{path}`"
+
+    if action == "use":
+        if len(parts) != 2:
+            return "⚠️ 用法：`/ws use 名称`"
+        name = parts[1]
+        path = store.bind_workspace(user_id, chat_id, name)
+        if not path:
+            return f"❌ 未找到工作空间：`{name}`，先用 `/ws save {name} 路径` 保存。"
+        return (
+            f"✅ 当前群组已绑定工作空间 `{name}`\n"
+            f"工作目录：`{path}`\n"
+            "如需清空旧上下文，可继续发送 `/new`。"
+        )
+
+    if action == "set":
+        if len(parts) != 2:
+            return "⚠️ 用法：`/ws set 路径`"
+        path = os.path.expanduser(parts[1])
+        if not os.path.isdir(path):
+            return f"❌ 路径不存在：`{path}`"
+        old_name = store.get_current_raw(user_id, chat_id).get("workspace", "")
+        store.set_cwd(user_id, chat_id, path)
+        suffix = "，并解除原工作空间绑定" if old_name else ""
+        return f"✅ 当前群组工作目录已切换为 `{path}`{suffix}"
+
+    if action in {"remove", "delete", "rm"}:
+        if len(parts) != 2:
+            return "⚠️ 用法：`/ws remove 名称`"
+        name = parts[1]
+        if not store.delete_workspace(user_id, name):
+            return f"❌ 未找到工作空间：`{name}`"
+        return f"✅ 已删除工作空间 `{name}`"
+
+    return (
+        f"❌ 未知子命令：`{action}`\n"
+        "可用：`list`、`save`、`use`、`set`、`remove`"
+    )
+
+
 def handle_command(
     cmd: str,
     args: str,
@@ -385,6 +543,9 @@ def handle_command(
 
     if cmd not in BOT_COMMANDS:
         return None  # 不认识的 /xxx → 转发给 Claude（如 /commit 等 skill）
+
+    if cmd == "ws":
+        cmd = "workspace"
 
     if cmd in ("help", "h"):
         return HELP_TEXT
@@ -429,6 +590,7 @@ def handle_command(
         sid = cur.get("session_id") or "（新 session）"
         model = cur.get("model", "未知")
         cwd = cur.get("cwd", "~")
+        workspace = cur.get("workspace") or "（未绑定）"
         started = cur.get("started_at", "")[:16].replace("T", " ")
         mode = cur.get("permission_mode") or "bypassPermissions"
         return (
@@ -436,6 +598,7 @@ def handle_command(
             f"Session ID: `{sid}`\n"
             f"模型: `{model}`\n"
             f"权限模式: `{mode}`\n"
+            f"工作空间: `{workspace}`\n"
             f"工作目录: `{cwd}`\n"
             f"开始时间: {started}"
         )
@@ -463,8 +626,16 @@ def handle_command(
         path = os.path.expanduser(args)
         if not os.path.isdir(path):
             return f"❌ 路径不存在：`{path}`"
+        old_name = store.get_current_raw(user_id, chat_id).get("workspace", "")
         store.set_cwd(user_id, chat_id, path)
-        return f"✅ 工作目录已切换为 `{path}`"
+        suffix = "，并解除原工作空间绑定" if old_name else ""
+        return f"✅ 工作目录已切换为 `{path}`{suffix}"
+
+    elif cmd == "ls":
+        return _list_directory(user_id, chat_id, store, args)
+
+    elif cmd == "workspace":
+        return _handle_workspace_command(args, user_id, chat_id, store)
 
     elif cmd == "skills":
         return _list_skills()

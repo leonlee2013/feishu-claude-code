@@ -25,6 +25,10 @@
 | `/model opus` | 切换模型 (opus / sonnet / haiku) |
 | `/status` | 当前 session 信息 |
 | `/cd ~/project` | 切换工作目录 |
+| `/ls` | 查看当前工作目录内容 |
+| `/ls src` | 查看当前工作目录下某个子目录 |
+| `/ws save 项目A ~/project-a` | 保存命名工作空间 |
+| `/ws use 项目A` | 将当前群组/私聊绑定到某个工作空间 |
 | `/usage` | 查看 Claude Max 用量 (macOS) |
 | `/skills` | 列出 Claude Skills |
 | `/mcp` | 列出 MCP Servers |
@@ -74,6 +78,7 @@ cp ~/.feishu-claude/sessions.json.backup.YYYYMMDD_HHMMSS ~/.feishu-claude/sessio
 - **工具调用进度** - 实时显示 Claude 正在读文件、执行命令等操作
 - **看门狗自愈** - 4 小时自动重启，防止 WebSocket 假死
 - **多用户隔离** - 每个飞书用户独立 session，互不干扰
+- **群组工作空间绑定** - 不同群组可长期绑定不同项目目录，切群即切项目
 
 ---
 

@@ -268,11 +268,19 @@ SESSIONS_FILE = os.path.join(SESSIONS_DIR, "sessions.json")
 
 
 class Session:
-    def __init__(self, session_id: Optional[str], model: str, cwd: str, permission_mode: str):
+    def __init__(
+        self,
+        session_id: Optional[str],
+        model: str,
+        cwd: str,
+        permission_mode: str,
+        workspace: str = "",
+    ):
         self.session_id = session_id
         self.model = model
         self.cwd = cwd
         self.permission_mode = permission_mode
+        self.workspace = workspace
 
 
 class SessionStore:
@@ -297,35 +305,82 @@ class SessionStore:
     def _dedup_all_histories(self):
         """启动时清理所有用户 history 中的重复 session_id"""
         changed = False
-        for user_id, user in self._data.items():
-            history = user.get("history", [])
-            seen = set()
-            cleaned = []
-            # 倒序遍历，保留每个 session_id 最后出现的那条
-            for h in reversed(history):
-                sid = h.get("session_id")
-                if sid and sid not in seen:
-                    seen.add(sid)
-                    cleaned.append(h)
-            cleaned.reverse()
-            if len(cleaned) != len(history):
-                user["history"] = cleaned
-                changed = True
+        for user in self._data.values():
+            for chat_data in user.values():
+                if not isinstance(chat_data, dict) or "history" not in chat_data:
+                    continue
+                history = chat_data.get("history", [])
+                seen = set()
+                cleaned = []
+                # 倒序遍历，保留每个 session_id 最后出现的那条
+                for h in reversed(history):
+                    sid = h.get("session_id")
+                    if sid and sid not in seen:
+                        seen.add(sid)
+                        cleaned.append(h)
+                cleaned.reverse()
+                if len(cleaned) != len(history):
+                    chat_data["history"] = cleaned
+                    changed = True
         if changed:
             self._save()
 
     def _user(self, user_id: str) -> dict:
-        return self._data.setdefault(user_id, {
-            "current": {
-                "session_id": None,
-                "model": DEFAULT_MODEL,
-                "cwd": DEFAULT_CWD,
-                "permission_mode": PERMISSION_MODE,
-                "started_at": datetime.now().isoformat(),
-                "preview": "",
-            },
-            "history": [],
-        })
+        return self._data.setdefault(user_id, {})
+
+    def _default_current(self) -> dict:
+        return {
+            "session_id": None,
+            "model": DEFAULT_MODEL,
+            "cwd": DEFAULT_CWD,
+            "permission_mode": PERMISSION_MODE,
+            "started_at": datetime.now().isoformat(),
+            "preview": "",
+            "workspace": "",
+        }
+
+    def _normalize_chat_key(self, user_id: str, chat_id: str) -> str:
+        return "private" if chat_id == user_id else chat_id
+
+    def _ensure_current_defaults(self, current: dict) -> bool:
+        changed = False
+        defaults = self._default_current()
+        for key, value in defaults.items():
+            if key not in current:
+                current[key] = value
+                changed = True
+        return changed
+
+    def _ensure_chat_data(self, user_id: str, chat_id: str) -> dict:
+        user = self._user(user_id)
+        chat_key = self._normalize_chat_key(user_id, chat_id)
+        changed = False
+
+        if chat_key not in user:
+            # 兼容旧结构：首次访问私聊时把顶层 current/history 迁入 private。
+            if chat_key == "private" and isinstance(user.get("current"), dict):
+                user[chat_key] = {
+                    "current": user.pop("current"),
+                    "history": user.pop("history", []),
+                }
+            else:
+                user[chat_key] = {
+                    "current": self._default_current(),
+                    "history": [],
+                }
+            changed = True
+
+        chat_data = user[chat_key]
+        if self._ensure_current_defaults(chat_data.setdefault("current", self._default_current())):
+            changed = True
+        if "history" not in chat_data:
+            chat_data["history"] = []
+            changed = True
+
+        if changed:
+            self._save()
+
+        return chat_data
 
     def get_summary(self, user_id: str, session_id: str) -> str:
         """获取缓存的摘要"""
@@ -345,29 +400,12 @@ class SessionStore:
             model=cur.get("model", DEFAULT_MODEL),
             cwd=cur.get("cwd", DEFAULT_CWD),
             permission_mode=cur.get("permission_mode", PERMISSION_MODE),
+            workspace=cur.get("workspace", ""),
         )
 
     def on_claude_response(self, user_id: str, chat_id: str, new_session_id: str, first_message: str):
         """Claude 回复后用返回的 session_id 更新状态"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
-        if user_id not in self._data:
-            self._data[user_id] = {}
-
-        if chat_key not in self._data[user_id]:
-            self._data[user_id][chat_key] = {
-                "current": {
-                    "session_id": None,
-                    "model": DEFAULT_MODEL,
-                    "cwd": DEFAULT_CWD,
-                    "permission_mode": PERMISSION_MODE,
-                    "started_at": datetime.now().isoformat(),
-                    "preview": "",
-                },
-                "history": [],
-            }
-
-        chat_data = self._data[user_id][chat_key]
+        chat_data = self._ensure_chat_data(user_id, chat_id)
         cur = chat_data["current"]
         old_id = cur.get("session_id")
 
@@ -399,25 +437,7 @@ class SessionStore:
 
     def new_session(self, user_id: str, chat_id: str) -> str:
         """Start a new session for a specific chat, return old session title"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
-        if user_id not in self._data:
-            self._data[user_id] = {}
-
-        if chat_key not in self._data[user_id]:
-            self._data[user_id][chat_key] = {
-                "current": {
-                    "session_id": None,
-                    "model": DEFAULT_MODEL,
-                    "cwd": DEFAULT_CWD,
-                    "permission_mode": PERMISSION_MODE,
-                    "started_at": datetime.now().isoformat(),
-                    "preview": "",
-                },
-                "history": [],
-            }
-
-        chat_data = self._data[user_id][chat_key]
+        chat_data = self._ensure_chat_data(user_id, chat_id)
         cur = chat_data["current"]
         old_title = ""
 
@@ -452,90 +472,40 @@ class SessionStore:
             "permission_mode": cur.get("permission_mode", PERMISSION_MODE),
             "started_at": datetime.now().isoformat(),
             "preview": "",
+            "workspace": cur.get("workspace", ""),
         }
         self._save()
         return old_title
 
     def set_model(self, user_id: str, chat_id: str, model: str):
         """Set model for a specific chat"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
-        if user_id not in self._data:
-            self._data[user_id] = {}
-
-        if chat_key not in self._data[user_id]:
-            self._data[user_id][chat_key] = {
-                "current": {
-                    "session_id": None,
-                    "model": DEFAULT_MODEL,
-                    "cwd": DEFAULT_CWD,
-                    "permission_mode": PERMISSION_MODE,
-                    "started_at": datetime.now().isoformat(),
-                    "preview": "",
-                },
-                "history": [],
-            }
-
-        self._data[user_id][chat_key]["current"]["model"] = model
+        chat_data = self._ensure_chat_data(user_id, chat_id)
+        chat_data["current"]["model"] = model
         self._save()
 
-    def set_cwd(self, user_id: str, chat_id: str, cwd: str):
+    def set_cwd(self, user_id: str, chat_id: str, cwd: str, workspace_name: Optional[str] = None):
         """Set working directory for a specific chat"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
-        if user_id not in self._data:
-            self._data[user_id] = {}
-
-        if chat_key not in self._data[user_id]:
-            self._data[user_id][chat_key] = {
-                "current": {
-                    "session_id": None,
-                    "model": DEFAULT_MODEL,
-                    "cwd": DEFAULT_CWD,
-                    "permission_mode": PERMISSION_MODE,
-                    "started_at": datetime.now().isoformat(),
-                    "preview": "",
-                },
-                "history": [],
-            }
-
-        self._data[user_id][chat_key]["current"]["cwd"] = cwd
+        chat_data = self._ensure_chat_data(user_id, chat_id)
+        chat_data["current"]["cwd"] = cwd
+        chat_data["current"]["workspace"] = workspace_name or ""
         self._save()
 
     def set_permission_mode(self, user_id: str, chat_id: str, mode: str):
         """Set permission mode for a specific chat"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
-        if user_id not in self._data:
-            self._data[user_id] = {}
-
-        if chat_key not in self._data[user_id]:
-            self._data[user_id][chat_key] = {
-                "current": {
-                    "session_id": None,
-                    "model": DEFAULT_MODEL,
-                    "cwd": DEFAULT_CWD,
-                    "permission_mode": PERMISSION_MODE,
-                    "started_at": datetime.now().isoformat(),
-                    "preview": "",
-                },
-                "history": [],
-            }
-
-        self._data[user_id][chat_key]["current"]["permission_mode"] = mode
+        chat_data = self._ensure_chat_data(user_id, chat_id)
+        chat_data["current"]["permission_mode"] = mode
         self._save()
 
     def resume_session(self, user_id: str, chat_id: str, index_or_id: str) -> tuple[Optional[str], str]:
         """按序号（1-based）或 session_id 恢复 session，返回 (session_id, old_title)"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
         if user_id not in self._data:
             return None, ""
 
+        chat_key = self._normalize_chat_key(user_id, chat_id)
         if chat_key not in self._data[user_id]:
             return None, ""
 
-        chat_data = self._data[user_id][chat_key]
+        chat_data = self._ensure_chat_data(user_id, chat_id)
         history = chat_data.get("history", [])
 
         try:
@@ -587,42 +557,52 @@ class SessionStore:
 
     def list_sessions(self, user_id: str, chat_id: str) -> list:
         """List all sessions for a specific chat"""
-        chat_key = "private" if chat_id == user_id else chat_id
-
         if user_id not in self._data:
             return []
 
+        chat_key = self._normalize_chat_key(user_id, chat_id)
         if chat_key not in self._data[user_id]:
             return []
 
-        return list(reversed(self._data[user_id][chat_key].get("history", [])))
+        return list(reversed(self._ensure_chat_data(user_id, chat_id).get("history", [])))
+
+    def list_workspaces(self, user_id: str) -> dict[str, str]:
+        """List saved workspaces for a user"""
+        return dict(sorted(self._user(user_id).get("workspaces", {}).items()))
+
+    def save_workspace(self, user_id: str, name: str, cwd: str):
+        """Save or update a named workspace for a user"""
+        user = self._user(user_id)
+        user.setdefault("workspaces", {})[name] = cwd
+        self._save()
+
+    def delete_workspace(self, user_id: str, name: str) -> bool:
+        """Delete a named workspace and clear active bindings that reference it"""
+        user = self._user(user_id)
+        workspaces = user.setdefault("workspaces", {})
+        if name not in workspaces:
+            return False
+
+        del workspaces[name]
+        for chat_data in user.values():
+            if not isinstance(chat_data, dict) or "current" not in chat_data:
+                continue
+            if chat_data["current"].get("workspace") == name:
+                chat_data["current"]["workspace"] = ""
+        self._save()
+        return True
+
+    def bind_workspace(self, user_id: str, chat_id: str, name: str) -> Optional[str]:
+        """Bind a saved workspace to the current chat"""
+        path = self._user(user_id).get("workspaces", {}).get(name)
+        if not path:
+            return None
+        self.set_cwd(user_id, chat_id, path, workspace_name=name)
+        return path
 
     def get_current_raw(self, user_id: str, chat_id: str = None) -> dict:
         """Get raw current session data for a specific chat"""
         if chat_id is None:
-            # Backward compatibility: if no chat_id, use old behavior
-            return self._user(user_id)["current"]
+            chat_id = user_id
 
-        # Normalize chat_id: private chat uses "private" key
-        chat_key = "private" if chat_id == user_id else chat_id
-
-        # Ensure user exists with new structure
-        if user_id not in self._data:
-            self._data[user_id] = {}
-
-        # Ensure chat exists
-        if chat_key not in self._data[user_id]:
-            self._data[user_id][chat_key] = {
-                "current": {
-                    "session_id": None,
-                    "model": DEFAULT_MODEL,
-                    "cwd": DEFAULT_CWD,
-                    "permission_mode": PERMISSION_MODE,
-                    "started_at": datetime.now().isoformat(),
-                    "preview": "",
-                },
-                "history": [],
-            }
-            self._save()
-
-        return self._data[user_id][chat_key]["current"]
+        return self._ensure_chat_data(user_id, chat_id)["current"]

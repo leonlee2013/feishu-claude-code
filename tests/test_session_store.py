@@ -13,6 +13,7 @@ os.environ.setdefault("PERMISSION_MODE", "bypassPermissions")
 # Add parent directory to path to import session_store
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from bot_config import DEFAULT_MODEL, PERMISSION_MODE
 from session_store import SessionStore
 
 
@@ -42,8 +43,8 @@ def test_get_current_with_chat_id_private(temp_store):
 
     # Should return default session for new user
     session = temp_store.get_current(user_id, chat_id)
-    assert session.model == "claude-sonnet-4-6"
-    assert session.permission_mode == "bypassPermissions"
+    assert session.model == DEFAULT_MODEL
+    assert session.permission_mode == PERMISSION_MODE
 
 
 def test_get_current_with_chat_id_group(temp_store):
@@ -53,8 +54,8 @@ def test_get_current_with_chat_id_group(temp_store):
 
     # Should return default session for new group
     session = temp_store.get_current(user_id, chat_id)
-    assert session.model == "claude-sonnet-4-6"
-    assert session.permission_mode == "bypassPermissions"
+    assert session.model == DEFAULT_MODEL
+    assert session.permission_mode == PERMISSION_MODE
 
 
 def test_session_isolation_between_chats(temp_store):
