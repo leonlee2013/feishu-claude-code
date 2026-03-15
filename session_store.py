@@ -286,6 +286,7 @@ class Session:
 class SessionStore:
     def __init__(self):
         os.makedirs(SESSIONS_DIR, exist_ok=True)
+        self._save_lock = asyncio.Lock()  # 保护 _save() 的全局锁
         self._data: dict = self._load()
         self._dedup_all_histories()
 
