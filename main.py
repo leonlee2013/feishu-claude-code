@@ -162,10 +162,6 @@ async def _process_message(sender_open_id: str, msg):
     parsed = parse_command(text)
     if parsed:
         cmd, args = parsed
-        if cmd == "stop":
-            reply = await _handle_stop_command(sender_open_id)
-            await feishu.send_card_to_user(sender_open_id, content=reply, loading=False)
-            return
         reply = handle_command(cmd, args, sender_open_id, store)
         if reply is not None:
             if cmd == "resume" and not args:

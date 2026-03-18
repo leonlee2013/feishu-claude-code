@@ -81,7 +81,7 @@ def parse_command(text: str) -> Optional[Tuple[str, str]]:
 
 
 # Bot 自身处理的命令，其余 /xxx 转发给 Claude
-BOT_COMMANDS = {"help", "h", "new", "clear", "resume", "model", "mode", "status", "cd", "skills", "mcp", "usage"}
+BOT_COMMANDS = {"help", "h", "new", "clear", "resume", "model", "mode", "status", "cd", "skills", "mcp", "usage", "stop"}
 
 
 def _build_session_list(user_id: str, store: SessionStore) -> list[dict]:
