@@ -1,6 +1,6 @@
 # feishu-claude-code
 
-在飞书里直接和你本机的 Claude Code 对话。
+!在飞书里直接和你本机的 Claude Code 对话。
 
 WebSocket 长连接，流式卡片输出，手机上随时 code review、debug、问问题。
 
