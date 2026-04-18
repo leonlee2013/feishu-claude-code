@@ -15,7 +15,8 @@ PERMISSION_MODE = os.getenv("PERMISSION_MODE", "bypassPermissions")
 
 SESSIONS_DIR = os.path.expanduser("~/.feishu-claude")
 
-# 卡片按钮回调 HTTP 端口（需 ngrok 暴露）
+# 本机 HTTP 端口（仅监听 127.0.0.1，供 handover.py 进程间通信用）
+# 卡片按钮回调走 WebSocket 长连接（on_card_action），不依赖此端口
 CALLBACK_PORT = int(os.getenv("CALLBACK_PORT", "9981"))
 
 # 流式卡片更新：每积累多少字符推送一次

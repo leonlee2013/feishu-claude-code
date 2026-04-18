@@ -821,70 +821,12 @@ async def _handle_handover(session_id: str, cwd: str, model: str,
     return {"ok": True, "user_id": user_id, "session_id": session_id}
 
 
-# ── 卡片回调 HTTP 服务（配合 ngrok 暴露给飞书）────────────────
+# ── 本机 HTTP 服务（仅供 handover.py 进程间调用）───────────────
+# 卡片按钮回调已由 WebSocket 长连接接收（见 on_card_action），
+# 这里保留一个只监听 127.0.0.1 的最小 HTTP 入口，用于 CLI → Bot 会话移交。
 
-class _CardCallbackHandler(BaseHTTPRequestHandler):
-    """处理飞书卡片按钮点击的 HTTP 回调"""
-
-    def do_POST(self):
-        length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length)
-        try:
-            data = json.loads(body)
-        except Exception:
-            self._respond(400, {"error": "bad json"})
-            return
-
-        # 飞书 URL 验证
-        if data.get("type") == "url_verification":
-            self._respond(200, {"challenge": data.get("challenge", "")})
-            return
-
-        event = data.get("event", {})
-        operator = event.get("operator", {})
-        user_id = operator.get("open_id", "")
-        action = event.get("action", {})
-        value = action.get("value", {})
-        context = event.get("context", {})
-
-        action_type = value.get("action", "")
-        chat_id = value.get("cid", user_id)
-        clicked_msg_id = context.get("open_message_id", "")
-
-        print(f"[HTTP回调] user={user_id[:8]}... action={action_type or 'reply'}", flush=True)
-
-        if action_type == "set_mode":
-            mode = value.get("mode", "")
-            if mode:
-                asyncio.run_coroutine_threadsafe(
-                    _handle_set_mode(user_id, chat_id, mode, clicked_msg_id),
-                    _bot_loop,
-                )
-            self._respond(200, {"toast": {"type": "success", "content": f"已切换: {mode}"}})
-        elif action_type == "run_cmd":
-            cmd_text = value.get("cmd", "")
-            if cmd_text:
-                asyncio.run_coroutine_threadsafe(
-                    _handle_menu_command(user_id, chat_id, cmd_text, clicked_msg_id),
-                    _bot_loop,
-                )
-            self._respond(200, {"toast": {"type": "info", "content": cmd_text}})
-        elif action_type == "resume_session":
-            sid = value.get("sid", "")
-            if sid:
-                asyncio.run_coroutine_threadsafe(
-                    _handle_resume_session(user_id, chat_id, sid, clicked_msg_id),
-                    _bot_loop,
-                )
-            self._respond(200, {"toast": {"type": "info", "content": "正在恢复..."}})
-        else:
-            reply_text = value.get("reply", "")
-            if reply_text:
-                asyncio.run_coroutine_threadsafe(
-                    _handle_button_reply(user_id, chat_id, reply_text, clicked_msg_id),
-                    _bot_loop,
-                )
-            self._respond(200, {"toast": {"type": "info", "content": f"已发送: {reply_text}"}})
+class _LocalHttpHandler(BaseHTTPRequestHandler):
+    """本机 HTTP 入口：仅处理 handover.py 的 /handover GET 请求"""
 
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
@@ -956,45 +898,11 @@ def _bg_summary_thread():
         time.sleep(600)  # 10 分钟
 
 
-def _start_callback_server(port):
-    server = HTTPServer(('0.0.0.0', port), _CardCallbackHandler)
+def _start_local_http_server(port):
+    """仅监听回环地址（127.0.0.1）：不会被公网/局域网访问到"""
+    server = HTTPServer(('127.0.0.1', port), _LocalHttpHandler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-
-
-def _start_ngrok(port):
-    """启动 ngrok 隧道，返回公网 URL"""
-    import subprocess
-    import urllib.request
-
-    # 先检查已有的 ngrok 隧道
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=2) as r:
-            tunnels = json.loads(r.read())
-            for t in tunnels.get("tunnels", []):
-                if t.get("proto") == "https":
-                    return t["public_url"]
-    except Exception:
-        pass
-
-    # 启动新 ngrok（有固定域名就用，保证重启后 URL 不变）
-    try:
-        ngrok_domain = os.environ.get("NGROK_DOMAIN", "")
-        ngrok_cmd = ["ngrok", "http", "--url", ngrok_domain, str(port)] if ngrok_domain else ["ngrok", "http", str(port)]
-        subprocess.Popen(
-            ngrok_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(3)
-        with urllib.request.urlopen("http://127.0.0.1:4040/api/tunnels", timeout=5) as r:
-            tunnels = json.loads(r.read())
-            for t in tunnels.get("tunnels", []):
-                if t.get("proto") == "https":
-                    return t["public_url"]
-    except Exception as e:
-        print(f"   [warn] ngrok 启动失败: {e}", flush=True)
-    return None
 
 
 # ── 启动 ──────────────────────────────────────────────────────
@@ -1006,14 +914,10 @@ def main():
     print(f"   默认工作目录: {config.DEFAULT_CWD}")
     print(f"   权限模式    : {config.PERMISSION_MODE}")
 
-    # 卡片回调 HTTP 服务 + ngrok 隧道
+    # 本机 HTTP 服务：仅供 handover.py 调用 /handover，不对外暴露
     cb_port = config.CALLBACK_PORT
-    _start_callback_server(cb_port)
-    ngrok_url = _start_ngrok(cb_port)
-    if ngrok_url:
-        print(f"   卡片回调    : {ngrok_url}/callback")
-    else:
-        print(f"   卡片回调    : http://localhost:{cb_port}/callback (需启动 ngrok)")
+    _start_local_http_server(cb_port)
+    print(f"   本机接口    : http://127.0.0.1:{cb_port}/handover")
 
     handler = lark.EventDispatcherHandler.builder("", "") \
         .register_p2_im_message_receive_v1(on_message_receive) \

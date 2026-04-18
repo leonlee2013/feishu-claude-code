@@ -189,15 +189,15 @@ python3 main.py
 2. 订阅方式选择「使用长连接接收事件」（不是 Webhook）
 3. 添加事件：`im.message.receive_v1`（接收消息）
 
-### 5. 开启卡片回调 (可选)
+### 5. 开启卡片回调
 
-按钮交互（选项点击、命令菜单）需要配置卡片回调：
+按钮交互（选项点击、命令菜单、Plan 审批）依赖卡片回调：
 
-1. 「事件与回调」→「卡片交互配置」
-2. 使用 ngrok 暴露本机 `CALLBACK_PORT`（默认 9981）
-3. 回调地址填 ngrok URL
+1. 「事件与回调」→「卡片回调配置」（或「卡片交互配置」）
+2. 订阅方式选择「使用长连接接收回调」，和事件订阅共用同一条 WebSocket，**无需公网 IP / ngrok**
+3. 无需填写回调地址
 
-> 不配置卡片回调时，所有功能仍可用，只是按钮点击不生效，需要手动输入命令。
+> 若你的应用卡片回调仍在 Webhook 模式，要么改成长连接（推荐），要么自行反向代理暴露 `CALLBACK_PORT`。本项目已不再内置 ngrok 启动逻辑。
 
 ### 6. 获取凭证
 
@@ -221,7 +221,7 @@ python3 main.py
 | `PERMISSION_MODE` | 否 | `bypassPermissions` | 工具权限模式 |
 | `STREAM_CHUNK_SIZE` | 否 | `20` | 流式推送的字符积累阈值 |
 | `CLAUDE_CLI_PATH` | 否 | 自动查找 | Claude CLI 可执行文件路径 |
-| `CALLBACK_PORT` | 否 | `9981` | 卡片按钮回调 HTTP 端口 |
+| `CALLBACK_PORT` | 否 | `9981` | 本机 HTTP 端口（只监听 `127.0.0.1`，给 `handover.py` 用） |
 
 ## 部署
 
